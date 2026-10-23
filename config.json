@@ -1,0 +1,13 @@
+{
+  "enabled": true,
+  "trigger": "%%",
+  "defaultTier": 2,
+  "keepAliveSec": 3000,
+  "snapshotMaxMB": 200,
+  "snapshotMaxFiles": 20000,
+  "snapshotTimeoutSec": 20,
+  "snapshotExclude": ["node_modules", ".git", "dist", "build", ".venv", "venv", "__pycache__", ".next", ".cache", "coverage", "target", ".iter-chain"],
+  "stopBlockMax": 1,
+  "outputWeight": 5,
+  "debug": false
+}
