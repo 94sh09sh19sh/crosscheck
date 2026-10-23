@@ -15,7 +15,7 @@ const DIRS = {
 };
 const LOG_FILE = path.join(STATE, 'crosscheck.log');
 const HISTORY_FILE = path.join(STATE, 'history.jsonl');
-const ITER_CHAIN_CONFIG = path.join(os.homedir(), '.claude', 'iter-chain', 'config.json');
+const ITER_CHAIN_DIR = path.join(os.homedir(), '.claude', 'iter-chain');
 
 const DEFAULT_CONFIG = {
   enabled: true,
@@ -67,7 +67,8 @@ function loadConfig() {
   try {
     env = JSON.parse(process.env.CROSSCHECK_CONFIG_JSON || '{}');
   } catch {}
-  return { ...DEFAULT_CONFIG, ...readJson(path.join(ROOT, 'config.json'), {}), ...env };
+  // config.json 是 repo 的預設值；config.local.json 是本機個人設定，部署不會覆蓋
+  return { ...DEFAULT_CONFIG, ...readJson(path.join(ROOT, 'config.json'), {}), ...readJson(path.join(ROOT, 'config.local.json'), {}), ...env };
 }
 
 function log(msg) {
@@ -111,7 +112,7 @@ function jobOfSession(sid) {
 
 // 跟 iter-chain 並用時只看第一段；分隔字串從 iter-chain 的設定讀
 function firstSegment(prompt) {
-  const ic = readJson(ITER_CHAIN_CONFIG, {});
+  const ic = { ...readJson(path.join(ITER_CHAIN_DIR, 'config.json'), {}), ...readJson(path.join(ITER_CHAIN_DIR, 'config.local.json'), {}) };
   const delim = ic.enabled === false ? '' : ic.delimiter || ';;;';
   const i = delim ? prompt.indexOf(delim) : -1;
   return i >= 0 ? prompt.slice(0, i) : prompt;

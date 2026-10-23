@@ -27,6 +27,7 @@
 7. Stop：還沒 prep 就停下，或子代理產出都到了卻沒 done，擋一次；等子代理時、`stop_hook_active` 時、已擋過時都放行。
 
 ## 設定（config.json）
+- 個人設定寫在同目錄的 `config.local.json`，只寫要改的鍵，會蓋過 `config.json`；更新工具時不會被覆蓋，也不會進 repo。
 - `enabled`：總開關。
 - `trigger`：觸發前綴（預設 `%%`）；`defaultTier`：只打前綴時的檔位。
 - `keepAliveSec`：`wait` 最長等多久（預設 3000 秒，讓主對話在快取 1 小時有效期內醒一次）；超額使用時快取可能只有 5 分鐘，可改成 240。
@@ -49,7 +50,7 @@
 
 ## 安裝與停用
 - `~/.claude/settings.json` 的 UserPromptSubmit 與 Stop 各加一個 hook：`node ~/.claude/crosscheck/hook.js`（Windows 上 `~` 不一定會展開，請換成實際的絕對路徑），timeout 30。
-- 暫停：`config.json` 的 `enabled` 改成 `false`；移除：刪掉上述兩個 hook。
+- 暫停：`config.local.json` 寫 `{"enabled": false}`；移除：刪掉上述兩個 hook。
 - iter-chain 整合：在 `~/.claude/iter-chain/hook.js` 的 `onSessionStart` 結尾，把本輪指令交給 `require('../crosscheck/lib').fromIterChain(input, r.instruction)`，回傳的文字附在注入內容後面；限額接手那條路改呼叫 `handOver(原 session id, input)`，把還在跑的 job 轉給新 session。已接上；iter-chain 的完成規則會要求 done 之後才寫輪次檔，Stop 時 job 還在 running 也不會接續下一輪。iter-chain 的 SessionStart hook 逾時要 30 秒（快照最多 15 秒），太短會連本輪指令一起遺失。
 
 ## 已知限制
