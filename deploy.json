@@ -3,5 +3,7 @@
   "hooks": [
     { "event": "UserPromptSubmit", "script": "hook.js", "timeout": 30 },
     { "event": "Stop", "script": "hook.js", "timeout": 30 }
-  ]
+  ],
+  "exclude": ["test.js"],
+  "test": "node test.js"
 }

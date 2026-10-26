@@ -1,4 +1,4 @@
-// crosscheck 共用函式：路徑、設定、觸發解析、job 建立、快照、diff、token 統計
+// crosscheck（粗心檢查）共用函式：路徑、設定、觸發解析、job 建立、快照、diff、token 統計
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -27,19 +27,20 @@ const DEFAULT_CONFIG = {
   snapshotTimeoutSec: 20,
   snapshotExclude: ['node_modules', '.git', 'dist', 'build', '.venv', 'venv', '__pycache__', '.next', '.cache', 'coverage', 'target', '.iter-chain'],
   stopBlockMax: 1,
+  autoScan: true,
+  stripTokens: ['^^'],
   outputWeight: 5,
   debug: false,
 };
 
-// 各檔位第一批要叫出的子代理與修正輪數上限（第 8 節）
+// 各檔位第一批要叫出的子代理與修正輪數上限；檔位 1 只有機械掃描與主對話自查
+// diffcheck 跑兩次是刻意的：同一份清單獨立再掃一次，比換角度更能抓到粗心
+const MAX_TIER = 3;
 const TIERS = {
-  1: { agents: ['blind'], fixRounds: 1 },
-  2: { agents: ['blind', 'review'], fixRounds: 1 },
-  3: { agents: ['blind', 'review'], fixRounds: 2 },
-  4: { agents: ['blind', 'review', 'premise'], fixRounds: 2 },
-  5: { agents: ['blind', 'review', 'premise'], fixRounds: 3 },
+  1: { agents: [], fixRounds: 1 },
+  2: { agents: [{ name: 'blind', out: 'blind-b.md' }, { name: 'diffcheck', out: 'diffcheck-1.md', extra: '輪次：1。' }], fixRounds: 1 },
+  3: { agents: [{ name: 'blind', out: 'blind-b.md' }, { name: 'diffcheck', out: 'diffcheck-1.md', extra: '輪次：1。' }, { name: 'diffcheck', out: 'diffcheck-2.md', extra: '輪次：2。' }], fixRounds: 2 },
 };
-const OUTPUT_OF = { blind: 'blind-b.md', review: 'review.md', premise: 'premise.md' };
 
 function ensureDirs() {
   for (const d of Object.values(DIRS)) fs.mkdirSync(d, { recursive: true });
@@ -118,15 +119,24 @@ function firstSegment(prompt) {
   return i >= 0 ? prompt.slice(0, i) : prompt;
 }
 
+const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 // 找觸發字串：前後必須是空白或字串頭尾，`%%i`、`50%%`、`a%%3` 都不算；有多個時取第一個
+// 舊檔位 4、5 視同 3；stripTokens 是其他工具的觸發字串（例：blindspot 的 ^^），一併從需求原文去掉
 function parseTrigger(text, cfg) {
-  const esc = cfg.trigger.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const m = new RegExp(`(^|\\s)${esc}([1-5])?(?=\\s|$)`).exec(String(text));
+  const m = new RegExp(`(^|\\s)${escRe(cfg.trigger)}([1-5])?(?=\\s|$)`).exec(String(text));
   if (!m) return null;
   const start = m.index + m[1].length;
   const end = start + cfg.trigger.length + (m[2] ? 1 : 0);
-  const rest = `${text.slice(0, start)}${text.slice(end)}`.replace(/[ \t]{2,}/g, ' ').trim();
-  return { tier: m[2] ? Number(m[2]) : cfg.defaultTier, request: rest };
+  let rest = `${text.slice(0, start)}${text.slice(end)}`;
+  let sibling = false;
+  for (const t of cfg.stripTokens || []) {
+    const re = new RegExp(`(^|\\s)${escRe(t)}[1-5]?(?=\\s|$)`, 'g');
+    sibling = sibling || re.test(rest);
+    rest = rest.replace(re, '$1');
+  }
+  rest = rest.replace(/[ \t]{2,}/g, ' ').trim();
+  return { tier: Math.min(m[2] ? Number(m[2]) : cfg.defaultTier, MAX_TIER), request: rest, sibling };
 }
 
 function run(cmd, args, opts = {}) {
@@ -229,13 +239,13 @@ function capture(job, name, cfg, timeoutMs) {
 }
 
 // hook 呼叫：建立 job、存原始需求、做快照、記住 session
-function createJob({ tier, request, cwd, sessionId, transcriptPath, source, timeoutMs }, cfg) {
+function createJob({ tier, request, cwd, sessionId, transcriptPath, source, timeoutMs, sibling = false }, cfg) {
   ensureDirs();
   const id = `cc${Date.now().toString(36)}`;
   const dir = jobDir(id);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 'request.md'), `${request}\n`);
-  const job = { id, tier, cwd, sessionId, transcriptPath, source, status: 'running', phase: 'work', blocks: 0, fixRounds: 0, expect: [], startedAt: Date.now() };
+  const job = { id, tier, cwd, sessionId, transcriptPath, source, sibling, status: 'running', phase: 'work', blocks: 0, fixRounds: 0, expect: [], startedAt: Date.now() };
   const t0 = Date.now();
   try {
     job.snapshot = capture(job, 'snapshot', cfg, timeoutMs ?? cfg.snapshotTimeoutSec * 1000);
@@ -251,9 +261,10 @@ function createJob({ tier, request, cwd, sessionId, transcriptPath, source, time
 // 注入主對話的短指令（hook 與 iter-chain 共用）
 function contextFor(job) {
   const lines = [
-    `[crosscheck] 本則指令啟用交叉檢查，檔位 ${job.tier}，job ${job.id}（${slash(jobDir(job.id))}）。觸發字串 %%${job.tier} 是指令，不是需求內容。`,
+    `[crosscheck] 本則指令啟用粗心檢查，檔位 ${job.tier}，job ${job.id}（${slash(jobDir(job.id))}）。觸發字串 %%${job.tier} 是指令，不是需求內容。`,
     `先照常完成任務，不要因此改變做法；完成後讀 ${slash(path.join(ROOT, 'playbook.md'))} 照做，跑完 done 之前不要結束回覆。`,
   ];
+  if (job.sibling) lines.push('同一則訊息也啟用了 blindspot：先照它的流程走到 go 再實作，實作完再回來跑本流程。');
   if (job.snapshot?.kind === 'none') lines.push(`注意：沒有改動前快照（${job.snapshot.reason}），盲測只依原始需求，不得讀改動前程式碼。`);
   return lines.join('\n');
 }
@@ -272,7 +283,7 @@ function fromIterChain(input, instruction) {
   const t = cfg.enabled && parseTrigger(String(instruction || ''), cfg);
   if (!t || !input.cwd || !input.session_id) return '';
   // iter-chain 的 SessionStart hook 逾時是 30 秒，快照最多給 15 秒；逾時的話整段注入（含本輪指令）都會遺失
-  const job = createJob({ tier: t.tier, request: t.request, cwd: input.cwd, sessionId: input.session_id, transcriptPath: input.transcript_path, source: 'iter-chain', timeoutMs: 15000 }, cfg);
+  const job = createJob({ tier: t.tier, request: t.request, cwd: input.cwd, sessionId: input.session_id, transcriptPath: input.transcript_path, source: 'iter-chain', timeoutMs: 15000, sibling: t.sibling }, cfg);
   return contextFor(job);
 }
 
@@ -311,6 +322,18 @@ function writeDiff(job, base, outFile, cfg) {
   }
   fs.writeFileSync(outFile, `${text}\n`);
   return text ? text.split('\n').length : 0;
+}
+
+// diff.patch 裡改動後還存在的檔案（絕對路徑），給機械掃描用
+function changedFiles(job) {
+  let text = '';
+  try {
+    text = fs.readFileSync(path.join(jobDir(job.id), 'diff.patch'), 'utf8');
+  } catch {
+    return [];
+  }
+  const base = job.snapshot?.kind === 'git' ? job.snapshot.repo : job.cwd;
+  return [...text.matchAll(/^\+\+\+ b\/(.+)$/gm)].map((m) => path.join(base, m[1].trim()));
 }
 
 // 快照的 worktree（git）或複製目錄；讓子代理讀改動前的檔案
@@ -437,9 +460,9 @@ function ledgerStats(job) {
 }
 
 module.exports = {
-  ROOT, STATE, DIRS, LOG_FILE, HISTORY_FILE, DEFAULT_CONFIG, TIERS, OUTPUT_OF,
+  ROOT, STATE, DIRS, LOG_FILE, HISTORY_FILE, DEFAULT_CONFIG, TIERS, MAX_TIER,
   ensureDirs, readJson, writeJson, loadConfig, log, readStdin, slash,
   jobDir, metaFile, sessionFile, loadJob, saveJob, listJobs, jobOfSession,
-  firstSegment, parseTrigger, createJob, contextFor, fromIterChain, handOver, capture, writeDiff, bindSnapshot, unbindSnapshot,
+  firstSegment, parseTrigger, createJob, contextFor, fromIterChain, handOver, capture, writeDiff, changedFiles, bindSnapshot, unbindSnapshot,
   usageOf, ledgerStats,
 };

@@ -8,6 +8,8 @@
   "snapshotTimeoutSec": 20,
   "snapshotExclude": ["node_modules", ".git", "dist", "build", ".venv", "venv", "__pycache__", ".next", ".cache", "coverage", "target", ".iter-chain"],
   "stopBlockMax": 1,
+  "autoScan": true,
+  "stripTokens": ["^^"],
   "outputWeight": 5,
   "debug": false
 }

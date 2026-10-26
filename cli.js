@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const L = require('./lib');
+const S = require('./scan');
 
 const argv = process.argv.slice(2);
 const flag = (name, dflt) => {
@@ -58,13 +59,17 @@ function prep() {
   }
   job.snapPath = snap;
   const lines = L.writeDiff(job, job.snapshot, path.join(dir, 'diff.patch'), cfg);
+  const issues = S.scanFiles(L.changedFiles(job));
+  fs.writeFileSync(path.join(dir, 'scan.md'), `${issues.map((i) => `- ${L.slash(i.file)}｜${i.problem}`).join('\n') || '無'}\n`);
   const agents = L.TIERS[job.tier].agents;
-  job.expect = agents.map((a) => L.OUTPUT_OF[a]);
+  job.expect = agents.map((a) => a.out);
   L.saveJob(job);
-  L.log(`[${job.id}] prep：快照 ${snap ? L.slash(snap) : '無'}，diff ${lines} 行，子代理 ${agents.join('、')}`);
+  L.log(`[${job.id}] prep：快照 ${snap ? L.slash(snap) : '無'}，diff ${lines} 行，掃描 ${issues.length} 項，子代理 ${agents.map((a) => a.out).join('、') || '無'}`);
   console.log(`job ${job.id}｜檔位 ${job.tier}｜快照 ${snap ? L.slash(snap) : `無（${job.snapshot.reason || job.snapshot.bindError}）`}｜diff ${L.slash(path.join(dir, 'diff.patch'))}（${lines} 行）`);
+  console.log(issues.length ? `機械掃描 ${issues.length} 項（${L.slash(path.join(dir, 'scan.md'))}），直接列入帳本：\n${issues.map((i) => `- ${L.slash(i.file)}｜${i.problem}`).join('\n')}` : '機械掃描：無');
+  if (!agents.length) return console.log(`檔位 1 不叫子代理：照 playbook「自查」一節自己做，接著記帳本`);
   console.log(`請在同一回合平行叫出以下子代理。${AGENT_RULE}`);
-  for (const a of agents) console.log(agentLine(job, a));
+  for (const a of agents) console.log(agentLine(job, a.name, a.extra));
   console.log(`叫出後用 Bash 背景執行（run_in_background）：node ${CLI} wait ${job.id}`);
 }
 
@@ -190,7 +195,7 @@ function clean() {
 }
 
 function status() {
-  console.log(`啟用：${cfg.enabled ? '是' : '否'}｜觸發字串：${cfg.trigger}1–${cfg.trigger}5（只打 ${cfg.trigger} 等於檔位 ${cfg.defaultTier}）｜保溫 ${cfg.keepAliveSec} 秒`);
+  console.log(`啟用：${cfg.enabled ? '是' : '否'}｜觸發字串：${cfg.trigger}1–${cfg.trigger}${L.MAX_TIER}（只打 ${cfg.trigger} 等於檔位 ${cfg.defaultTier}）｜自動掃描：${cfg.autoScan ? '開' : '關'}｜保溫 ${cfg.keepAliveSec} 秒`);
   const jobs = L.listJobs().sort((a, b) => b.startedAt - a.startedAt).slice(0, 10);
   if (!jobs.length) return console.log('job：無');
   for (const j of jobs) console.log(`- ${j.id}｜${j.status}/${j.phase}｜檔位 ${j.tier}｜快照 ${j.snapshot?.kind}｜修正 ${j.fixRounds} 輪｜${when(j.startedAt)}｜${j.cwd}`);
@@ -205,6 +210,11 @@ function log() {
   }
 }
 
-const cmds = { status, log, prep, wait, 'fix-start': fixStart, 'fix-end': fixEnd, usage, done, cancel, clean };
+// 手動掃描指定檔案；沒問題不輸出
+function scan() {
+  for (const i of S.scanFiles([arg, ...rest].filter(Boolean).map((f) => path.resolve(f)))) console.log(`- ${L.slash(i.file)}｜${i.problem}`);
+}
+
+const cmds = { status, log, scan, prep, wait, 'fix-start': fixStart, 'fix-end': fixEnd, usage, done, cancel, clean };
 if (cmds[cmd]) Promise.resolve(cmds[cmd]()).catch((e) => console.log(`錯誤：${e.message || e}`));
-else console.log('用法：node cli.js [status|log [行數]|prep <job>|wait <job> [檔名…] [--max 秒]|fix-start <job>|fix-end <job>|usage <job>|done <job>|cancel <job|all>|clean [天數]]');
+else console.log('用法：node cli.js [status|log [行數]|scan <檔案…>|prep <job>|wait <job> [檔名…] [--max 秒]|fix-start <job>|fix-end <job>|usage <job>|done <job>|cancel <job|all>|clean [天數]]');
