@@ -88,14 +88,61 @@ function readStdin() {
 }
 
 const slash = (p) => String(p).split(path.sep).join('/');
-const jobDir = (id) => path.join(DIRS.jobs, id);
-const metaFile = (id) => path.join(jobDir(id), 'meta.json');
+// 兩個目錄：stateDir 在 ~/.claude 底下，只有 node 寫（meta、快照複本、worktree）；
+// jobDir 是主對話與子代理要寫的工作目錄，放在專案裡的 .crosscheck/<id>（~/.claude 被 Claude Code 當成敏感位置，寫入會被擋）
+const WORK_NAME = '.crosscheck';
+// 工作目錄的名稱（含 blindspot 的），快照與 diff 一律排除
+const WORK_DIRS = ['.crosscheck', '.blindspot'];
+const stateDir = (id) => path.join(DIRS.jobs, id);
+const jobDir = (job) => job.work || stateDir(job.id);
+const metaFile = (id) => path.join(stateDir(id), 'meta.json');
 const sessionFile = (sid) => path.join(DIRS.sessions, `${sid}.json`);
 const loadJob = (id) => (id ? readJson(metaFile(id)) : null);
 
+// 工作目錄也放一份 meta.json，給子代理讀 cwd 與 snapPath
 function saveJob(job) {
   job.updatedAt = Date.now();
   writeJson(metaFile(job.id), job);
+  if (job.work && fs.existsSync(job.work)) writeJson(path.join(job.work, 'meta.json'), job);
+}
+
+// 在專案裡建工作目錄；上層放內容為 * 的 .gitignore，git 看不到也不用改使用者的檔。建不了就退回 stateDir
+function makeWork(cwd, id) {
+  const base = path.join(cwd, WORK_NAME);
+  try {
+    fs.mkdirSync(path.join(base, id), { recursive: true });
+    if (!fs.existsSync(path.join(base, '.gitignore'))) fs.writeFileSync(path.join(base, '.gitignore'), '*\n');
+    return path.join(base, id);
+  } catch {
+    fs.mkdirSync(stateDir(id), { recursive: true });
+    return null;
+  }
+}
+
+function copyDir(src, dest) {
+  for (const e of fs.readdirSync(src, { withFileTypes: true })) {
+    const s = path.join(src, e.name);
+    const d = path.join(dest, e.name);
+    if (e.isDirectory()) copyDir(s, d);
+    else if (e.isFile()) {
+      fs.mkdirSync(dest, { recursive: true });
+      fs.copyFileSync(s, d);
+    }
+  }
+}
+
+// 結束或取消時：工作目錄的文字紀錄搬到 stateDir/work，刪掉專案裡的目錄（空了連 .crosscheck 一起刪）
+function archiveWork(job) {
+  if (!job.work || !fs.existsSync(job.work) || job.work.startsWith(DIRS.jobs)) return;
+  try {
+    copyDir(job.work, path.join(stateDir(job.id), 'work'));
+    fs.rmSync(job.work, { recursive: true, force: true });
+    const base = path.dirname(job.work);
+    if (fs.readdirSync(base).every((f) => f === '.gitignore')) fs.rmSync(base, { recursive: true, force: true });
+    job.work = path.join(stateDir(job.id), 'work');
+  } catch (e) {
+    log(`[${job.id}] 搬移工作目錄失敗：${e.message || e}`);
+  }
 }
 
 function listJobs() {
@@ -179,7 +226,7 @@ function gitCommit(repo, tree, msg) {
 
 // 列出非 git 資料夾的檔案；超過上限或時間就丟錯
 function walk(root, cfg, deadline = Infinity) {
-  const skip = new Set(cfg.snapshotExclude);
+  const skip = new Set([...cfg.snapshotExclude, ...WORK_DIRS]);
   const files = [];
   let bytes = 0;
   const maxBytes = cfg.snapshotMaxMB * 1024 * 1024;
@@ -220,9 +267,10 @@ function copyTree(src, dest, cfg, deadline) {
   return files.length;
 }
 
-// 存下目前狀態：git 存成 commit，其他資料夾複製一份；name 是 job 目錄底下的名稱
+// 存下目前狀態：git 存成 commit，其他資料夾複製一份；name 是 stateDir 底下的名稱
 function capture(job, name, cfg, timeoutMs) {
-  const dir = jobDir(job.id);
+  const dir = stateDir(job.id);
+  fs.mkdirSync(dir, { recursive: true });
   const repo = gitTop(job.cwd);
   if (repo) {
     const tree = gitTree(repo, path.join(dir, `${name}.index`), timeoutMs);
@@ -242,10 +290,9 @@ function capture(job, name, cfg, timeoutMs) {
 function createJob({ tier, request, cwd, sessionId, transcriptPath, source, timeoutMs, sibling = false }, cfg) {
   ensureDirs();
   const id = `cc${Date.now().toString(36)}`;
-  const dir = jobDir(id);
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'request.md'), `${request}\n`);
-  const job = { id, tier, cwd, sessionId, transcriptPath, source, sibling, status: 'running', phase: 'work', blocks: 0, fixRounds: 0, expect: [], startedAt: Date.now() };
+  const work = makeWork(cwd, id);
+  fs.writeFileSync(path.join(work || stateDir(id), 'request.md'), `${request}\n`);
+  const job = { id, tier, cwd, work, sessionId, transcriptPath, source, sibling, status: 'running', phase: 'work', blocks: 0, fixRounds: 0, expect: [], startedAt: Date.now() };
   const t0 = Date.now();
   try {
     job.snapshot = capture(job, 'snapshot', cfg, timeoutMs ?? cfg.snapshotTimeoutSec * 1000);
@@ -261,7 +308,7 @@ function createJob({ tier, request, cwd, sessionId, transcriptPath, source, time
 // 注入主對話的短指令（hook 與 iter-chain 共用）
 function contextFor(job) {
   const lines = [
-    `[crosscheck] 本則指令啟用粗心檢查，檔位 ${job.tier}，job ${job.id}（${slash(jobDir(job.id))}）。觸發字串 %%${job.tier} 是指令，不是需求內容。`,
+    `[crosscheck] 本則指令啟用粗心檢查，檔位 ${job.tier}，job ${job.id}（${slash(jobDir(job))}）。觸發字串 %%${job.tier} 是指令，不是需求內容。`,
     `先照常完成任務，不要因此改變做法；完成後讀 ${slash(path.join(ROOT, 'playbook.md'))} 照做，跑完 done 之前不要結束回覆。`,
   ];
   if (job.sibling) lines.push('同一則訊息也啟用了 blindspot：先照它的流程走到 go 再實作，實作完再回來跑本流程。');
@@ -303,7 +350,7 @@ function handOver(oldSid, input) {
 function writeDiff(job, base, outFile, cfg) {
   let text = '';
   if (base.kind === 'git') {
-    const cur = gitTree(base.repo, path.join(jobDir(job.id), 'now.index'), cfg.snapshotTimeoutSec * 3000);
+    const cur = gitTree(base.repo, path.join(stateDir(job.id), 'now.index'), cfg.snapshotTimeoutSec * 3000);
     text = git(base.repo, ['diff', '--no-color', base.sha, cur]).out;
   } else if (base.kind === 'copy') {
     const before = new Set(walk(base.dir, cfg));
@@ -328,7 +375,7 @@ function writeDiff(job, base, outFile, cfg) {
 function changedFiles(job) {
   let text = '';
   try {
-    text = fs.readFileSync(path.join(jobDir(job.id), 'diff.patch'), 'utf8');
+    text = fs.readFileSync(path.join(jobDir(job), 'diff.patch'), 'utf8');
   } catch {
     return [];
   }
@@ -341,7 +388,7 @@ function bindSnapshot(job) {
   const s = job.snapshot;
   if (s.kind === 'copy') return s.dir;
   if (s.kind !== 'git') return null;
-  const wt = path.join(jobDir(job.id), 'snap-wt');
+  const wt = path.join(stateDir(job.id), 'snap-wt');
   if (!fs.existsSync(wt)) {
     const r = git(s.repo, ['worktree', 'add', '--detach', wt, s.sha]);
     if (!r.ok) throw new Error(`git worktree add 失敗：${r.err.slice(0, 200)}`);
@@ -452,7 +499,7 @@ function usageOf(job, cfg) {
 function ledgerStats(job) {
   let text = '';
   try {
-    text = fs.readFileSync(path.join(jobDir(job.id), 'ledger.md'), 'utf8');
+    text = fs.readFileSync(path.join(jobDir(job), 'ledger.md'), 'utf8');
   } catch {}
   const rows = text.split('\n').filter((l) => /^-\s*F\d+/.test(l));
   const has = (w) => rows.filter((l) => l.includes(w)).length;
@@ -462,7 +509,7 @@ function ledgerStats(job) {
 module.exports = {
   ROOT, STATE, DIRS, LOG_FILE, HISTORY_FILE, DEFAULT_CONFIG, TIERS, MAX_TIER,
   ensureDirs, readJson, writeJson, loadConfig, log, readStdin, slash,
-  jobDir, metaFile, sessionFile, loadJob, saveJob, listJobs, jobOfSession,
+  WORK_DIRS, stateDir, jobDir, archiveWork, metaFile, sessionFile, loadJob, saveJob, listJobs, jobOfSession,
   firstSegment, parseTrigger, createJob, contextFor, fromIterChain, handOver, capture, writeDiff, changedFiles, bindSnapshot, unbindSnapshot,
   usageOf, ledgerStats,
 };

@@ -148,7 +148,7 @@ test('prep：檔位 1 不叫子代理但會掃描；檔位 2 叫 blind 與 diffc
   const j1 = L.createJob({ tier: 1, request: '改 a', cwd: proj, sessionId: 's-p1', transcriptPath: '', source: 'test' }, cfg);
   const j2 = L.createJob({ tier: 2, request: '改 a', cwd: proj, sessionId: 's-p2', transcriptPath: '', source: 'test' }, cfg);
   fs.writeFileSync(path.join(proj, 'a.json'), '{bad');
-  for (const j of [j1, j2]) fs.writeFileSync(path.join(L.jobDir(j.id), 'handoff.md'), '## 改動檔案\n- a.json\n');
+  for (const j of [j1, j2]) fs.writeFileSync(path.join(L.jobDir(j), 'handoff.md'), '## 改動檔案\n- a.json\n');
   const o1 = cli('prep', j1.id);
   assert.match(o1, /機械掃描 1 項/);
   assert.match(o1, /檔位 1 不叫子代理/);
@@ -158,6 +158,30 @@ test('prep：檔位 1 不叫子代理但會掃描；檔位 2 叫 blind 與 diffc
   assert.match(o2, /prompts\/diffcheck\.md.*輪次：1/);
   assert.deepStrictEqual(L.loadJob(j2.id).expect, ['blind-b.md', 'diffcheck-1.md']);
   cli('cancel', 'all');
+});
+
+test('工作目錄：放在專案的 .crosscheck，git 看不到、不進 diff，取消後搬回 state 並清掉', () => {
+  const repo = path.join(tmp, 'repo');
+  fs.mkdirSync(repo, { recursive: true });
+  const g = (...a) => spawnSync('git', a, { cwd: repo, encoding: 'utf8' });
+  g('init', '-q');
+  fs.writeFileSync(path.join(repo, 'a.txt'), '1\n');
+  g('add', '.');
+  g('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'init');
+  const job = L.createJob({ tier: 1, request: '改 a', cwd: repo, sessionId: 's-r', transcriptPath: '', source: 'test' }, cfg);
+  assert.strictEqual(path.dirname(job.work), path.join(repo, '.crosscheck'));
+  assert.ok(fs.existsSync(path.join(job.work, 'request.md')));
+  assert.ok(fs.existsSync(path.join(job.work, 'meta.json')));
+  assert.strictEqual(g('status', '--porcelain').stdout.trim(), '');
+  fs.writeFileSync(path.join(repo, 'a.txt'), '2\n');
+  fs.writeFileSync(path.join(job.work, 'handoff.md'), '## 改動檔案\n- a.txt\n');
+  cli('prep', job.id);
+  const diff = fs.readFileSync(path.join(job.work, 'diff.patch'), 'utf8');
+  assert.match(diff, /a\.txt/);
+  assert.doesNotMatch(diff, /\.crosscheck|handoff/);
+  cli('cancel', job.id);
+  assert.ok(!fs.existsSync(path.join(repo, '.crosscheck')));
+  assert.ok(fs.existsSync(path.join(L.stateDir(job.id), 'work', 'handoff.md')));
 });
 
 test('Stop hook：job 未完成時擋一次，在等背景工作時不擋', () => {

@@ -27,7 +27,7 @@ function jobStop(input, cfg) {
   const job = L.jobOfSession(input.session_id);
   if (!job || job.status !== 'running' || input.stop_hook_active || waiting(input) || job.blocks >= cfg.stopBlockMax) return false;
   if (job.phase === 'review') {
-    const dir = L.jobDir(job.id);
+    const dir = L.jobDir(job);
     if (!job.expect.length || !job.expect.every((f) => fs.existsSync(path.join(dir, f)))) return false;
   }
   job.blocks++;

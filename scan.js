@@ -13,6 +13,8 @@ const LEFTOVERS = [
   [/^\s*(\/\/|#)\s*(\.{3}\s*(existing|rest of|其餘|其他|原本)|rest of (the )?(code|file)|其餘(程式|內容)?(不變|照舊|同上))/im, '留有「其餘照舊」之類的省略註解', true],
 ];
 const DOC = /\.(md|markdown|txt|rst)$/i;
+// crosscheck、blindspot 放在專案裡的工作目錄，不算專案改動
+const WORK = /[\\/]\.(crosscheck|blindspot)[\\/]/;
 
 function read(file) {
   try {
@@ -126,7 +128,7 @@ function lastTurn(transcriptPath, cwd, tailBytes = 4 * 1024 * 1024) {
     for (const b of e.message.content) {
       if (b.type === 'tool_use' && EDIT_TOOLS.test(b.name)) {
         const f = b.input?.file_path || b.input?.notebook_path;
-        if (f) files.push(path.resolve(cwd || '.', f));
+        if (f && !WORK.test(path.resolve(cwd || '.', f))) files.push(path.resolve(cwd || '.', f));
       } else if (b.type === 'tool_use' && RUN_TOOLS.test(b.name)) ran = true;
       else if (b.type === 'text' && b.text) reply = b.text;
     }

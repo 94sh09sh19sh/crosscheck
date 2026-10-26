@@ -30,24 +30,27 @@ function need() {
 }
 
 function agentLine(job, name, extra = '') {
-  return `- description「crosscheck ${name}」，prompt：讀 ${prompt(name)} 照做。job 目錄：${L.slash(L.jobDir(job.id))}。檔位：${job.tier}。${extra}`;
+  return `- description「crosscheck ${name}」，prompt：讀 ${prompt(name)} 照做。job 目錄：${L.slash(L.jobDir(job))}。檔位：${job.tier}。${extra}`;
 }
 
 const AGENT_RULE = '叫法：subagent_type general-purpose，effort "high"，不傳 model；能選背景執行就選背景。';
 
-// 移除大型複本（非 git 快照、修正前檢查點），保留文字紀錄
+// 移除大型複本（非 git 快照、修正前檢查點），文字紀錄從專案搬回 stateDir
 function dropCopies(job) {
   L.unbindSnapshot(job);
-  const dir = L.jobDir(job.id);
-  for (const d of fs.readdirSync(dir)) {
-    if (d === 'snapshot' || /^pre-fix-\d+$/.test(d)) fs.rmSync(path.join(dir, d), { recursive: true, force: true });
-  }
+  const dir = L.stateDir(job.id);
+  try {
+    for (const d of fs.readdirSync(dir)) {
+      if (d === 'snapshot' || /^pre-fix-\d+$/.test(d)) fs.rmSync(path.join(dir, d), { recursive: true, force: true });
+    }
+  } catch {}
+  L.archiveWork(job);
 }
 
 // handoff 寫完後呼叫：記下 C 的分界、準備快照目錄與 diff、印出要叫的子代理
 function prep() {
   const job = need();
-  const dir = L.jobDir(job.id);
+  const dir = L.jobDir(job);
   if (!fs.existsSync(path.join(dir, 'handoff.md'))) return console.log(`還沒有 ${L.slash(path.join(dir, 'handoff.md'))}，先照 playbook 寫好再執行 prep`);
   if (!job.prepAt) job.prepAt = Date.now();
   job.phase = 'review';
@@ -80,7 +83,7 @@ async function wait() {
     job.expect = rest;
     L.saveJob(job);
   }
-  const dir = L.jobDir(job.id);
+  const dir = L.jobDir(job);
   const limit = Date.now() + (maxSec || cfg.keepAliveSec) * 1000;
   for (;;) {
     job = L.loadJob(job.id);
@@ -114,11 +117,11 @@ function fixEnd() {
   const job = need();
   if (!job.checkpoint) return console.log(`還沒執行 fix-start ${job.id}`);
   const n = job.checkpoint.n;
-  const file = path.join(L.jobDir(job.id), `fix-${n}.patch`);
+  const file = path.join(L.jobDir(job), `fix-${n}.patch`);
   const lines = L.writeDiff(job, job.checkpoint, file, cfg);
   job.fixRounds = n;
   delete job.checkpoint;
-  fs.rmSync(path.join(L.jobDir(job.id), `pre-fix-${n}`), { recursive: true, force: true });
+  fs.rmSync(path.join(L.stateDir(job.id), `pre-fix-${n}`), { recursive: true, force: true });
   if (job.tier >= 3) job.expect = [`recheck-${n}.md`];
   L.saveJob(job);
   console.log(`第 ${n} 輪修正的 diff：${L.slash(file)}（${lines} 行）`);
@@ -135,7 +138,7 @@ function fmt(u) {
 function usage(print = true) {
   const job = need();
   const u = L.usageOf(job, cfg);
-  L.writeJson(path.join(L.jobDir(job.id), 'usage.json'), u);
+  L.writeJson(path.join(L.jobDir(job), 'usage.json'), u);
   if (!print) return u;
   console.log(`C（觸發到 prep）：${fmt(u.C)}`);
   console.log(`主對話額外：${fmt(u.mainExtra)}`);
@@ -182,7 +185,7 @@ function clean() {
   for (const job of L.listJobs()) {
     if (job.status === 'running' || (job.updatedAt || job.startedAt) > limit) continue;
     dropCopies(job);
-    fs.rmSync(L.jobDir(job.id), { recursive: true, force: true });
+    fs.rmSync(L.stateDir(job.id), { recursive: true, force: true });
     n++;
   }
   try {

@@ -30,6 +30,8 @@
 
 ## 流程（觸發時）
 1. UserPromptSubmit：偵測觸發字串（跟 iter-chain 並用時只看第一段），建立 job：`request.md`（去掉觸發字串與 `stripTokens` 的原文）、`meta.json`、快照。
+   - 主對話與子代理要寫的檔放在專案裡的 `.crosscheck/<job>/`（上層有內容為 `*` 的 `.gitignore`，git 看不到，也不進快照與 diff）；`~/.claude` 底下會被 Claude Code 當成敏感位置擋下寫入。
+   - 快照複本、worktree、meta 放 `~/.claude/crosscheck/state/jobs/<job>/`；done 或 cancel 時工作目錄搬到這裡的 `work/`，專案裡的目錄刪掉。
 2. 快照：git repo 用暫時 index 檔把工作目錄（含未追蹤檔）寫成一個不掛分支的 commit，不動你的 index、工作目錄、分支；其他資料夾複製一份（排除 `snapshotExclude`，超過大小或檔數就放棄，改成只依需求盲測）。
 3. 主對話完成任務、跑外部驗證，寫 `handoff.md`（改動檔案、介面、驗證結果）與 `risks.md`（中性風險問句）。
 4. `cli.js prep`：記下 C 的分界、建立快照 worktree、產生 `diff.patch`、機械掃描寫 `scan.md`、印出要叫的子代理；主對話平行叫出，背景跑 `cli.js wait` 保溫。
